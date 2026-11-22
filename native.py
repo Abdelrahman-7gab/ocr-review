@@ -53,6 +53,14 @@ SEVERITIES = ["critical", "high", "medium", "low"]
 # Only with --list-excluded (not OCR): excluded files a reviewer may still want to read.
 CONTEXT_REASONS = {"default_path", "unsupported_ext", "user_exclude", "too_large"}
 
+# OCR's exclude reasons, in words for the report.
+REASONS = {"default_path": "OCR's default excludes (tests, fixtures, build output, lock files)",
+           "unsupported_ext": "file type OCR does not review (docs, data, images)",
+           "user_exclude": "excluded by --exclude or a rule file",
+           "provider_directory": "vendored or dependency directory",
+           "binary": "binary file", "secret_exclude": "secrets file", "deleted": "deleted",
+           "too_large": "diff over OCR's 160,000-token limit"}
+
 GRACE = ("Your review budget is exhausted. This is your FINAL round. You may ONLY:\n"
          "- Call code_comment to submit any findings you have identified but not yet reported.\n"
          "- Call task_done if you have nothing more to report.\n"
@@ -680,8 +688,7 @@ How to call them here (repository {repo}; run commands from there):
 - file_find: Glob (side new); side old: `git ls-tree -r --name-only {base}`.
 - file_read_diff: look the path up in {out}/diffmap.json and Read the file it names (any changed file in this run).
 - code_comment: each comment becomes one object in "comments" of your answer file, with exactly the fields of
-  code_comment's items above (content, existing_code, suggestion_code, category, severity, path), plus
-  "thinking" (your reasoning for it) if you like.
+  code_comment's items above (content, existing_code, suggestion_code, category, severity, path).
 - task_done: write your answer file with the Write tool, then stop:
   {out_file}
   {{"state": "DONE" or "FAILED", "comments": [ ... ], "files_reviewed": [every path you looked at]}}
@@ -874,7 +881,7 @@ def cmd_position(a):
                "suggestion_code": s(c.get("suggestion_code")),
                "category": cat if cat in CATEGORIES else "other",
                "severity": sev if sev in SEVERITIES else "low",
-               "thinking": s(c.get("thinking")), "round": a.round, "index": idx,
+               "round": a.round, "index": idx,
                "start_line": 0, "end_line": 0}
         target = target_of(rec["existing_code"])
         r = resolve(state, by_path[path], target, cache) if path in by_path else None
@@ -1046,7 +1053,12 @@ def cmd_report(a):
     lines = [f"# OCR review of {state['repo']}",
              f"{state['mode']}: base {state['base'][:10]}, to {state['to'][:10]}; effort {state['effort']}; "
              f"model {state['model']}; {state.get('ocr_version')} with prompts from {state.get('prompts_pinned')}",
-             "", "## Coverage"]
+             ""]
+    failed_n = sum(1 for g in state["groups"] or [] if g.get("failed"))
+    if failed_n:
+        lines += [f"**Review incomplete: {failed_n} of {len(state['groups'])} groups failed; their files were "
+                  f"not reviewed, so the findings below do not cover them.**", ""]
+    lines += ["## Coverage"]
     for g in state["groups"] or []:
         paths = [state["files"][i]["path"] for i in g["files"]]
         miss = [p for p in paths if p not in set(g.get("files_reviewed", []))]
@@ -1054,7 +1066,8 @@ def cmd_report(a):
         lines.append(f"- group {g['id']} ({status}): {', '.join(paths)}"
                      + (f" — the reviewer did not list: {', '.join(miss)}" if miss and not g.get("failed") else ""))
     for f in state["excluded"]:
-        lines.append(f"- excluded {f['path']}: {f.get('exclude_reason')}")
+        why = REASONS.get(f.get("exclude_reason"), f.get("exclude_reason"))
+        lines.append(f"- excluded {f['path']}: {why}")
     lines += ["", f"## Findings ({len(allc)})"]
     for c in allc:
         where = (f"{c['path']}:{c['start_line']}-{c['end_line']}" if c["start_line"] > 0
@@ -1081,6 +1094,11 @@ def cmd_report(a):
         lines += [f"- `{c['path']}:{c['start_line']}` {c['content'][:200]} ({c['verdict']})" for c in rejected]
     write(os.path.join(out, "report.md"), "\n".join(lines) + "\n")
     counts = {sv: sum(1 for c in allc if c["severity"] == sv) for sv in SEVERITIES}
+    groups = state["groups"] or []
+    failed = [g["id"] for g in groups if g.get("failed")]
+    if failed:
+        print(f"REVIEW INCOMPLETE: {len(failed)} of {len(groups)} groups failed ({', '.join(map(str, failed))}); "
+              f"their files were not reviewed")
     print(f"{len(allc)} findings {counts}, {len(dropped)} removed by the filter"
           + (f", {len(rejected)} rejected by the check" if rejected else ""))
     print(f"report: {out}/report.md\nfindings: {out}/findings.json "
