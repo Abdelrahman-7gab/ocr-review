@@ -2,67 +2,69 @@
 
 A [Claude Code](https://claude.com/claude-code) skill that runs
 [Open Code Review](https://github.com/alibaba/open-code-review)'s **native review
-pipeline** on Claude Code subagents, so it uses your Claude subscription and needs no API
-key or OCR model provider.
+pipeline** (what `ocr review` does) on Claude Code subagents, so it uses your Claude
+subscription and needs no API key or OCR model provider.
 
-OCR's native mode (`ocr review`) calls a model provider directly. Its delegation mode
-uses your agent's model but skips most of the pipeline. This skill keeps the pipeline:
+OCR's native mode calls a model provider directly. Its delegation mode uses your agent's
+model but skips most of the pipeline. This skill keeps the whole pipeline and changes only
+who answers the model calls:
 
-1. **Select and rule**: `ocr delegate preview` and `ocr delegate rule` (no model) pick the
-   files and the review checklist for each one.
-2. **Group**: OCR's thresholds; at 4 or more files, OCR's grouping prompt.
-3. **Plan**: OCR's planning prompt, for larger groups, in round 1 only.
-4. **Review in rounds**: OCR's main review prompt, verbatim, in a fresh subagent each
-   round (1, 2 or 3 by effort). Later rounds are told what is already confirmed, and the
-   loop stops early when a round adds nothing.
-5. **Position**: every finding is placed by the code it quotes, using OCR's matching
-   tiers (the diff's new side, without blank lines, the old side, the whole file, then a
-   unique match in another file), with OCR's relocation prompt as a fallback.
-6. **Filter**: OCR's fact-checking prompt. It removes only findings that the diff proves
-   wrong, it protects five kinds of finding, and it keeps everything when it fails.
-7. **Check**: an Opus subagent re-checks critical and high findings against the code
-   (an addition, not in OCR).
-
-`native.py` does every step that needs no model. Subagents do the rest, Sonnet by default
-and Opus for groups whose paths look risky (auth, money, data, migrations, sync).
+- **OCR's CLI where OCR has a command:** `ocr delegate preview` picks the files and resolves
+  the background (sanitised and wrapped as OCR does); `ocr delegate rule` resolves the
+  review rules, including your `--rule` file and the project's `.opencodereview/rule.json`.
+- **OCR's code, ported, where it has no command:** one `git diff --find-renames` over the
+  whole change split per file as OCR's parser does (renames, quoted paths and odd bytes
+  included), grouping thresholds, prompt assembly, the prompt-size gate, comment
+  positioning, the confirmed-findings block, stop rules and the 30-finding cap.
+- **OCR's prompts, verbatim, answered by Claude subagents:** grouping, plan, each review
+  round (a fresh subagent per round), re-location of comments it cannot place, and the
+  fact-checking review filter. Every subagent runs on one model, as OCR uses one model.
 
 ## Install
 
 ```bash
-npm install -g @alibaba-group/open-code-review   # the ocr CLI, >= 1.9
+npm install -g @alibaba-group/open-code-review   # the ocr CLI
 git clone https://github.com/Abdelrahman-7gab/ocr-review ~/.claude/skills/ocr-review
 ```
 
-Requires `git` 2.41 or later and Python 3.9 or later. Then ask Claude Code for "an OCR
-review of this branch against main". [SKILL.md](SKILL.md) is the procedure Claude follows.
+Requires git and Python 3.9 or later. Then ask Claude Code for "an OCR review of this
+branch against main". [SKILL.md](SKILL.md) is the procedure Claude follows; `native.py`
+is the script it runs between model steps.
 
-## How it compared
+A team rulebook goes in an OCR rule file, as in OCR:
 
-All three were run on one 12-file TypeScript change (+602 lines):
-
-| | Claude Code `/code-review` | delegation-style skill | this skill (medium effort) |
-|---|---|---|---|
-| wall time | ~2 min | ~6 min | ~15 min |
-| findings | 9, unverified, 1 false positive | 7, verified | 20 (1 high, 9 medium, 10 low) |
-| the one crash bug | missed | found | found |
-| a data-loss bug | missed | found | found, in round 2 |
-
-A third of the findings came from round 2. Use `--effort low` for a single round.
+```json
+{"rules": [{"path": "**/*", "rule": "/abs/path/code-rules.md", "merge_system_rule": true}]}
+```
 
 ## What differs from OCR's native mode
 
-- **Token counting.** Tokens are estimated as characters / 4, so the size gates are
-  approximate.
-- **Budget and compression.** Subagents have no hard 100-call budget and no "final
-  round". The harness block asks for the budget instead, and Claude Code compacts
-  context in its own way.
-- **Tests and docs.** Files that OCR excludes by default (tests, docs) are listed in
-  each reviewer's "other changed files", so they get read as context.
-- **Report order.** Findings are reported most severe first (OCR prints critical last).
-- **Extra check.** An Opus check of critical and high findings is added.
+Necessary, because the model is a Claude Code subagent rather than an API call:
+
+- **Tool calls.** The subagent gets OCR's tool definitions verbatim plus a short mapping
+  onto Claude Code's tools (Read, Grep, Glob, git). It writes its `code_comment` calls
+  and its `task_done` state into one JSON answer file instead of calling tools.
+- **Turn budget.** There is no hard 100-call counter or forced final round; the subagent is
+  given OCR's final-round message to apply when it nears about 100 calls.
+- **Context compression.** OCR's compression prompt is not used; Claude Code compacts on
+  its own.
+- **Token counts.** No tokenizer: tokens are estimated as characters / 3.5, so OCR's
+  160,000-token gates fire at about the same size, not exactly.
+- **Retries.** A subagent that fails is run once more, standing in for OCR's HTTP retries.
+
+Choices, each off or presentation-only unless you ask:
+
+- **Model.** `--model opus` (default) or `sonnet`, for every step of a run.
+- **Report order.** Findings are listed most severe first (OCR prints critical last), with
+  the comments the filter removed listed below them.
+- **`--list-excluded`** (off by default): also name excluded tests, docs, user-excluded and
+  too-large files in each reviewer's "other changed files".
+- **Extra check** (only when asked): a subagent re-checks critical and high findings against
+  the code; rejected findings are listed apart and OCR's original severity is kept.
 
 ## Licence and attribution
 
-Apache License 2.0 ([LICENSE](LICENSE)). The prompts in `prompts/` are Open Code Review's,
-copied unmodified. `native.py` reimplements its pipeline. [NOTICE](NOTICE) has the
-details. This project is not affiliated with Alibaba Group or the Open Code Review project.
+Apache License 2.0 ([LICENSE](LICENSE)). The prompts and tool definitions are Open Code
+Review's, copied unmodified; `native.py` is a Python port of its review code.
+[NOTICE](NOTICE) has the details. This project is not affiliated with Alibaba Group or the
+Open Code Review project.
