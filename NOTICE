@@ -1,0 +1,20 @@
+ocr-review: Open Code Review's native review pipeline, run through Claude Code subagents.
+
+This product includes software from Open Code Review
+(https://github.com/alibaba/open-code-review), licensed under the Apache License 2.0
+(prompts/LICENSE-open-code-review), at commit e74f2c6bd4422bd1e12d257d1725bcce1d6b9ddd:
+
+- prompts/*.md and prompts/tools.json are copied unmodified from
+  internal/config/template/prompts/ and internal/config/toolsconfig/tools.json.
+- native.py is an independent reimplementation, in Python, of the review pipeline's
+  deterministic stages (grouping thresholds, prompt rendering, comment positioning,
+  confirmed-findings bookkeeping, filter handling), written from reading that source.
+  It contains no Go code from the project.
+
+Changes made here relative to Open Code Review's native mode: model calls are made by
+Claude Code subagents instead of an API provider; a <harness> block maps OCR's tool names
+onto Claude Code's tools; excluded files are listed to reviewers as context; findings are
+reported most severe first; an extra check of critical/high findings is added.
+
+This project is not affiliated with or endorsed by Alibaba Group or the Open Code Review
+maintainers.
