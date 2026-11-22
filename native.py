@@ -14,7 +14,7 @@ follows. Prompts in prompts/ are OCR's, verbatim.
 
   native.py plan     --out DIR [--repo P] [--from REF [--to REF] | --commit SHA]
                      [--background-file F | --background TEXT] [--rule F] [--exclude GLOBS]
-                     [--effort low|medium|high] [--model opus|sonnet] [--list-excluded]
+                     [--effort low|medium|high] [--model opus|sonnet] [--list-excluded] [--language L]
   native.py groups   --out DIR [--response FILE]
   native.py render   --out DIR --group N --round R
   native.py position --out DIR --group N --round R [--relocated FILE]
@@ -26,6 +26,7 @@ import argparse
 import datetime
 import json
 import os
+import posixpath
 import re
 import subprocess
 import sys
@@ -119,8 +120,24 @@ def run_json(cmd, cwd):
 
 def prompt(name):
     """template.go: prompt files are right-trimmed of \\r\\n."""
-    with open(os.path.join(PROMPTS, name + ".md")) as fh:
+    with uopen(os.path.join(PROMPTS, name + ".md")) as fh:
         return fh.read().rstrip("\r\n")
+
+
+def substitute(text, values, pattern=r"\{\{(\w+)\}\}"):
+    """Fill every placeholder in one pass, so text inserted for one placeholder is never scanned
+    for another. OCR substitutes one after another (agent.go: buildMainTaskMessages,
+    executeGroupReviewFilter; diff/relocation.go), which lets a diff that contains a placeholder
+    name receive another value; this is a declared improvement (README)."""
+    return re.sub(pattern, lambda m: values.get(m.group(1), m.group(0)), text)
+
+
+def uopen(path, mode="r", **kw):
+    """Text files are UTF-8 whatever the locale; undecodable bytes read as U+FFFD."""
+    kw.setdefault("encoding", "utf-8")
+    if "r" in mode:
+        kw.setdefault("errors", "replace")
+    return open(path, mode, **kw)
 
 
 def tokens(text):
@@ -129,25 +146,25 @@ def tokens(text):
 
 
 def load(out):
-    with open(os.path.join(out, "state.json")) as fh:
+    with uopen(os.path.join(out, "state.json")) as fh:
         return json.load(fh)
 
 
 def save(out, state):
-    with open(os.path.join(out, "state.json"), "w") as fh:
+    with uopen(os.path.join(out, "state.json"), "w") as fh:
         json.dump(state, fh, indent=1)
 
 
 def write(path, text):
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w") as fh:
+    with uopen(path, "w") as fh:
         fh.write(text)
 
 
 def read_text(path):
     if not path or not os.path.exists(path):
         return None
-    with open(path, errors="replace") as fh:
+    with uopen(path, errors="replace") as fh:
         return fh.read()
 
 
@@ -338,7 +355,7 @@ def full_diff(state):
 def new_content(state, path):
     if state["mode"] == "workspace":
         p = os.path.join(state["repo"], path)
-        return open(p, errors="replace").read() if os.path.exists(p) else ""
+        return uopen(p, errors="replace").read() if os.path.exists(p) else ""
     return git(state["repo"], "show", "--end-of-options", f"{state['to']}:{path}", check=False) or ""
 
 
@@ -384,7 +401,7 @@ def cmd_plan(a):
 
     state = {
         "repo": repo, "mode": mode, "base": base, "to": to, "reads_tree": reads_tree,
-        "effort": a.effort, "rounds": ROUNDS[a.effort], "model": a.model,
+        "effort": a.effort, "rounds": ROUNDS[a.effort], "model": a.model, "language": a.language,
         "background": preview.get("background") or "",
         "started": datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
         "ocr_version": version, "prompts_pinned": PINNED, "list_excluded": a.list_excluded,
@@ -401,7 +418,7 @@ def cmd_plan(a):
         diffmap[d["path"]] = dp
         if d["renamed"] and d["old"] != d["path"]:
             diffmap.setdefault(d["old"], dp)
-    with open(os.path.join(out, "diffmap.json"), "w") as fh:
+    with uopen(os.path.join(out, "diffmap.json"), "w") as fh:
         json.dump(diffmap, fh, indent=1)
 
     by_path = {d["path"]: d for d in parsed}
@@ -453,7 +470,7 @@ def cmd_plan(a):
         listing = "".join(f"[{i}] {entry(f)}\n" for i, f in enumerate(state["files"]))
         resp = os.path.join(out, "grouping.json")
         text = (f"<system>\n{prompt('grouping_task_system')}\n</system>\n\n"
-                f"{prompt('grouping_task_user').replace('{{file_list}}', listing)}\n\n"
+                f"{substitute(prompt('grouping_task_user'), {'file_list': listing})}\n\n"
                 f"<harness>\nAnswer with no tools other than Write: write only the JSON array to {resp}. "
                 f"Final message: one line, \"written\".\n</harness>\n")
         write(os.path.join(out, "grouping-prompt.md"), text)
@@ -528,7 +545,7 @@ def cmd_groups(a):
             sized.append({"label": g["label"], "files": g["files"][s0:s0 + MAX_FILES_PER_GROUP]})
     final = []                                   # enforceGroupTokenBudget
     for g in sized:
-        size = sum(tokens(open(files[i]["diff"], errors="replace").read()) for i in g["files"])
+        size = sum(tokens(uopen(files[i]["diff"], errors="replace").read()) for i in g["files"])
         if size > TOKEN_LIMIT and len(g["files"]) > 1:
             final += [{"label": f"{g['label']} (split: {files[i]['path']})", "files": [i]} for i in g["files"]]
         else:
@@ -579,7 +596,7 @@ def write_inputs(out, state, g):
     files = state["files"]
     members = {files[i]["path"] for i in g["files"]}
     diffs = "\n\n".join(                         # buildConcatenatedDiffs
-        f'<file path="{files[i]["path"]}">\n{open(files[i]["diff"], errors="replace").read()}\n</file>'
+        f'<file path="{files[i]["path"]}">\n{uopen(files[i]["diff"], errors="replace").read()}\n</file>'
         for i in g["files"])
     others = [entry(f) for f in state["working_set"] if f["path"] not in members]   # buildChangeFilesExceptGroup
     if state.get("list_excluded"):
@@ -593,23 +610,22 @@ def write_inputs(out, state, g):
 def fill(text, out, state, g, plan="", confirmed=""):
     """agent.go: buildMainTaskMessages, same substitution order, blocks stripped where OCR strips them."""
     gd = gdir(out, g["id"])
-    for k, v in [("current_system_date_time", state["started"]),
-                 ("system_rule", open(os.path.join(gd, "rule.md")).read()),
-                 ("change_files", open(os.path.join(gd, "others.txt")).read()),
-                 ("diffs", open(os.path.join(gd, "diffs.txt")).read()),
-                 ("requirement_background", state["background"])]:
-        text = text.replace("{{" + k + "}}", v)
-    if not plan:
+    if not plan:        # the empty blocks are stripped from the template, before any value goes in
         text = re.sub(r"(?m)^### [^\n]*Review Plan[^\n]*\n\{\{plan_guidance\}\}\n\n?", "", text)
-    text = text.replace("{{plan_guidance}}", plan)
     if not confirmed:
         text = re.sub(r"(?m)^### [^\n]*Confirmed Findings[^\n]*\n\{\{confirmed_comments\}\}\n\n?", "", text)
-    return text.replace("{{confirmed_comments}}", confirmed)
+    return substitute(text, {
+        "current_system_date_time": state["started"],
+        "system_rule": read_text(os.path.join(gd, "rule.md")) or "",
+        "change_files": read_text(os.path.join(gd, "others.txt")) or "",
+        "diffs": read_text(os.path.join(gd, "diffs.txt")) or "",
+        "requirement_background": state["background"],
+        "plan_guidance": plan, "confirmed_comments": confirmed})
 
 
 def tool_defs(names, workspace):
     """tools.json definitions, with toolsconfig/comparison.go: comparisonDefinition applied."""
-    raw = json.load(open(os.path.join(PROMPTS, "tools.json")))
+    raw = json.load(uopen(os.path.join(PROMPTS, "tools.json")))
     defs = {t["name"]: json.loads(json.dumps(t["definition"])) for t in raw}
     out = []
     for name in names:
@@ -640,8 +656,10 @@ def tool_defs(names, workspace):
     return out
 
 
-def format_tool_defs(defs):
-    """agent.go: formatToolDefs (parameters in definition order)."""
+def format_tool_defs(defs, nested=False):
+    """agent.go: formatToolDefs (parameters in definition order). `nested` (the reviewer's harness
+    only, not OCR's plan prompt) also lists array items' fields and enum values, which OCR's API
+    hands the model as the tool schema."""
     lines = ["### Available Tools (reference only — do not call)"]
     for d in defs:
         lines.append(f"- **{d['name']}**: {d['description']}")
@@ -650,14 +668,24 @@ def format_tool_defs(defs):
             req = set(d["parameters"].get("required", []))
             lines.append("  Parameters:")
             for p, spec in props.items():
-                lines.append(f"  - {p}: {spec.get('description', '')}{' (required)' if p in req else ''}")
+                lines.append(f"  - {p}: {spec.get('description', '')}{' (required)' if p in req else ''}"
+                             + (f" One of: {', '.join(spec['enum'])}." if nested and spec.get("enum") else ""))
+                items = spec.get("items") or {}
+                if nested and items.get("properties"):
+                    ireq = set(items.get("required", []))
+                    lines.append("    Each item:")
+                    for ip, ispec in items["properties"].items():
+                        enum = f" One of: {', '.join(ispec['enum'])}." if ispec.get("enum") else ""
+                        lines.append(f"    - {ip}: {ispec.get('description', '')}"
+                                     f"{' (required)' if ip in ireq else ''}{enum}")
     return "\n".join(lines) + "\n"
 
 
 def write_plan_prompt(out, state, g):
     tools = format_tool_defs(tool_defs(["code_search", "file_read", "file_read_diff", "file_find"],
                                        state["mode"] == "workspace"))
-    system = prompt("plan_task_system").replace("{{plan_tools}}", tools) + "\n\nAlways respond in English."
+    system = (substitute(prompt("plan_task_system"), {"plan_tools": tools})
+              + f"\n\nAlways respond in {state.get('language', 'English')}.")
     user = fill(prompt("plan_task_user"), out, state, g)
     pf = os.path.join(gdir(out, g["id"]), "plan.txt")
     write(os.path.join(gdir(out, g["id"]), "plan-prompt.md"),
@@ -671,7 +699,7 @@ def write_plan_prompt(out, state, g):
 def adapter(state, out, out_file):
     repo, base, to = state["repo"], state["base"], state["to"]
     tools = format_tool_defs(tool_defs(["task_done", "code_comment", "code_search", "file_read",
-                                        "file_read_diff", "file_find"], state["mode"] == "workspace"))
+                                        "file_read_diff", "file_find"], state["mode"] == "workspace"), nested=True)
     new_read = ("Read the file in the working tree" if state["reads_tree"]
                 else f"`git --no-pager show {to}:<path>` (the working tree is NOT the reviewed version)")
     old = ("the old side is an empty tree (no files)" if base == EMPTY_TREE
@@ -734,7 +762,7 @@ def cmd_render(a):
     pf = os.path.join(gdir(out, g["id"]), "plan.txt")
     if a.round == 1 and g["plan"] and os.path.exists(pf):
         plan = (read_text(pf) or "").replace("<think>", "").replace("</think>", "").strip()
-    system = prompt("main_task_system") + "\n\nAlways respond in English."
+    system = prompt("main_task_system") + f"\n\nAlways respond in {state.get('language', 'English')}."
     user = fill(prompt("main_task_user"), out, state, g, plan=plan, confirmed=confirmed_block(g["confirmed"]))
     if tokens(system + user) > TOKEN_LIMIT:      # checkPromptBudget
         if a.round == 1:
@@ -805,7 +833,7 @@ def match(seq, target):
 
 def resolve(state, f, target, cache):
     """ResolveComment: hunk new side, new side without blank lines, old side, whole new file."""
-    hs = hunks(open(f["diff"], errors="replace").read())
+    hs = hunks(uopen(f["diff"], errors="replace").read())
     for h in hs:
         r = match(h["new"], target)
         if r:
@@ -828,7 +856,7 @@ def clean_path(p):
     p = p.replace("\\", "/")
     if not p:
         return ""
-    p = os.path.normpath(p)
+    p = posixpath.normpath(p)
     p = p[1:] if p.startswith("/") else p
     return "" if p == "." else p
 
@@ -902,16 +930,17 @@ def cmd_position(a):
         elif path in by_path and str(idx) not in replies:
             unplaced.append(rec)
         recs.append(rec)
-    with open(os.path.join(rd, "positioned.json"), "w") as fh:
+    with uopen(os.path.join(rd, "positioned.json"), "w") as fh:
         json.dump({"state": st, "why": raw.get("why"), "files_reviewed": raw.get("files_reviewed") or [],
                    "comments": recs}, fh, indent=1)
     placed = sum(1 for r in recs if r["start_line"] > 0)
     print(f"{len(recs)} comments, {placed} placed, {len(recs) - placed} at line 0; reviewer state {st}"
           + (f" ({raw.get('why')})" if raw.get("why") else ""))
     for rec in unplaced:                  # RE_LOCATION_TASK, one per unplaced comment in a known file
-        d = open(by_path[rec["path"]]["diff"], errors="replace").read()
-        user = (prompt("re_location_task_user").replace("{diff}", d)
-                .replace("{existing_code}", rec["existing_code"]).replace("{suggestion_content}", rec["content"]))
+        d = uopen(by_path[rec["path"]]["diff"], errors="replace").read()
+        user = substitute(prompt("re_location_task_user"),
+                          {"diff": d, "existing_code": rec["existing_code"], "suggestion_content": rec["content"]},
+                          r"\{(diff|existing_code|suggestion_content)\}")
         p = os.path.join(rd, f"relocate-{rec['index']}.md")
         write(p, f"<system>\n{prompt('re_location_task_system')}\n</system>\n\n{user}\n\n<harness>\nNo tools: "
                  f"answer in your final message exactly as the task says.\n</harness>\n")
@@ -953,9 +982,9 @@ def cmd_filter(a):
             item["existing_code"] = c["existing_code"]
         compact.append(item)
     comments = json.dumps(compact, ensure_ascii=False, separators=(",", ":"))
-    user = (prompt("review_filter_task_user").replace("{{path}}", g["key"])
-            .replace("{{diff}}", open(os.path.join(gdir(out, g["id"]), "diffs.txt")).read())
-            .replace("{{comments}}", comments))
+    user = substitute(prompt("review_filter_task_user"), {
+        "path": g["key"], "comments": comments,
+        "diff": read_text(os.path.join(gdir(out, g["id"]), "diffs.txt")) or ""})
     tools = json.dumps(FILTER_TOOLS, ensure_ascii=False, indent=1)
     harness = (f"<harness>\nThese are the two tools OCR gives you for this task, verbatim; you must call exactly "
                f"one:\n{tools}\nHere you cannot call tools. Use no tools other than Write: judge from this "
@@ -1048,7 +1077,7 @@ def cmd_report(a):
     rejected = [c for c in allc if str(c.get("verdict", "")).startswith("REJECTED")]
     allc = [c for c in allc if c not in rejected]
     allc.sort(key=lambda c: rank.get(c["severity"], 4))
-    with open(os.path.join(out, "findings.json"), "w") as fh:
+    with uopen(os.path.join(out, "findings.json"), "w") as fh:
         json.dump({"comments": allc, "dropped": dropped, "rejected": rejected}, fh, indent=1)
     lines = [f"# OCR review of {state['repo']}",
              f"{state['mode']}: base {state['base'][:10]}, to {state['to'][:10]}; effort {state['effort']}; "
@@ -1121,6 +1150,7 @@ def main():
     pl.add_argument("--effort", choices=list(ROUNDS), default="medium")
     pl.add_argument("--model", choices=["opus", "sonnet"], default="opus")
     pl.add_argument("--list-excluded", action="store_true")
+    pl.add_argument("--language", default="English")
     for name in ("groups", "report"):
         s1 = sub.add_parser(name)
         s1.add_argument("--out", required=True)

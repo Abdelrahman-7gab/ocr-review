@@ -52,9 +52,21 @@ Necessary, because the model is a Claude Code subagent rather than an API call:
   160,000-token gates fire at about the same size, not exactly.
 - **Retries.** A subagent that fails is run once more, standing in for OCR's HTTP retries.
 
+Improvements over OCR (OCR's own code has these bugs):
+
+- **One-pass placeholders.** OCR fills its prompt placeholders one after another, so a diff
+  that happens to contain a placeholder name (`{{plan_guidance}}`, `{{comments}}`, `{diff}`…)
+  gets another value pasted into it. Here every placeholder is filled in one pass, and a diff
+  is always shown as it is. It only matters for diffs that contain those names, such as a
+  review of this skill or of OCR.
+- **Comment fields shown.** OCR's API hands the reviewer the `code_comment` schema; here the
+  reviewer's tool list also spells out each comment field and its allowed values.
+
 Choices, each off or presentation-only unless you ask:
 
 - **Model.** `--model opus` (default) or `sonnet`, for every step of a run.
+- **Language.** `--language` (default English), as OCR's language setting: the reply language
+  added to the review and plan prompts.
 - **Report order.** Findings are listed most severe first (OCR prints critical last), with
   the comments the filter removed listed below them.
 - **`--list-excluded`** (off by default): also name excluded tests, docs, user-excluded and

@@ -40,7 +40,7 @@ Run up to 8 subagents at once (OCR's group concurrency).
 ```bash
 native.py plan --out $OUT --repo <repo> [--from <base> [--to <head>] | --commit <sha>] \
   [--background-file <file> | --background "<text>"] [--rule <rule.json>] [--exclude <globs>] \
-  [--effort low|medium|high] [--model opus|sonnet] [--list-excluded]
+  [--effort low|medium|high] [--model opus|sonnet] [--list-excluded] [--language English]
 ```
 
 - Targets as in `ocr`: a branch or PR is `--from <base>` (merge-base taken) `--to <head>`; the
@@ -52,6 +52,7 @@ native.py plan --out $OUT --repo <repo> [--from <base> [--to <head>] | --commit 
   `{"rules": [{"path": "**/*", "rule": "/abs/path/code-rules.md", "merge_system_rule": true}]}`.
   The project's `.opencodereview/rule.json` and the global one apply as in OCR.
 - `--effort`: review rounds per group, 1 / 2 (default) / 3.
+- `--language`: the language reviewers answer in (OCR's language setting), English by default.
 - `--list-excluded` (not OCR, off by default): also list excluded tests, docs, user-excluded and
   too-large files in each reviewer's "other changed files".
 
@@ -78,7 +79,8 @@ For round `r` = 1, 2, …:
    `position` with `--relocated <that file>`. Comments still unplaced stay at line 0 and are kept.
 3. `native.py filter --out $OUT --group g --round r`. Unless it prints `skip`, run a subagent on
    the printed prompt; it writes `filter.json`.
-4. `native.py apply --out $OUT --group g --round r`. It prints `NEXT round r+1` or `STOP (<reason>)`:
+4. `native.py apply --out $OUT --group g --round r` (it reads `filter.json`; `--response <file>`
+   reads another file). It prints `NEXT round r+1` or `STOP (<reason>)`:
    a failed reviewer (round 1: the group failed; later: earlier findings kept), no new surviving
    finding, 30 confirmed findings, or the last round. The filter fails open. Running `apply`
    twice for a round changes nothing.
