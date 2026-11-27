@@ -108,8 +108,15 @@ def git(repo, *args, check=True):
     return None if out is None else out.decode("utf-8", errors="replace")
 
 
+def resolve_cmd(cmd):
+    # Windows: npm installs `ocr` as ocr.cmd, which CreateProcess does not find by bare name.
+    import shutil
+    found = shutil.which(cmd[0])
+    return [found, *cmd[1:]] if found else cmd
+
+
 def run_json(cmd, cwd):
-    res = subprocess.run(cmd, cwd=cwd, capture_output=True)
+    res = subprocess.run(resolve_cmd(cmd), cwd=cwd, capture_output=True)
     if res.returncode != 0:
         sys.exit(f"command failed: {' '.join(cmd)}\n{res.stderr.decode(errors='replace').strip()}")
     data = json.loads(res.stdout.decode("utf-8", errors="replace"))
@@ -381,7 +388,7 @@ def cmd_plan(a):
     elif a.background:
         pv_flags = ["--background", a.background]
     preview = run_json(["ocr", "delegate", "preview"] + common + pv_flags, repo)
-    version = (subprocess.run(["ocr", "--version"], capture_output=True, text=True).stdout.strip()
+    version = (subprocess.run(resolve_cmd(["ocr", "--version"]), capture_output=True, text=True).stdout.strip()
                .split("\n") or [""])[0]
 
     mode = preview["mode"]
